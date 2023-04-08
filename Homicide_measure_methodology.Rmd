@@ -1,0 +1,248 @@
+# How does Cook County compare to other places?
+## by Joe Mahr/ Chicago Tribune
+
+```{r setup, echo=T, error=F, results=F, message=F, warning=F}
+library(knitr)
+opts_chunk$set(out.width="900px", dpi=300)
+```
+
+This analysis uses [R](https://www.r-project.org/) code, with a mixture of source data from the Cook County State's Attorney's office and the National Center for State Courts (NCSC). In essence, NCSC did a national study measuring the percentage of homicide cases that were completed within a year. And while Cook County did not participate, I was able to analyze comparable data kept by the state's attorney's office to assess how Cook County would have measured in that timeframe.
+
+This dovetails from an earlier analysis called Cook_murder_case_length. For a deeper explanation of the state's attorney data, please refer to that.
+
+### **Getting the data**
+
+One key dataset was provided to me by Brian Ostrom at NCSC. He led a [thorough study](https://www.ncsc.org/__data/assets/pdf_file/0019/53218/Timely-Justice-in-Criminal-Cases-What-the-Data-Tells-Us.pdf) that gathered data from courts across the country. Among other things, the research calculated the percentage of homicide cases that were concluded within a year. 
+
+Another key dataset comes from the Cook County state's attorney's office. This records every case disposition and is explained more thoroughly in Length_of_cases analysis. Because of some missing entries in this dataset, I also grabbed another two datasets to see if they had those entries.
+
+You can grab all those files from this [Google drive folder](https://drive.google.com/drive/folders/1g0jRnpb-BN4c7S9k0_lmv_aKu7UjFL0h?usp=share_link). Then be sure to put them in a folder in your working directory called raw_data.
+
+```{r loading, warning=F, message=F, results=F}
+
+# List of packages for session
+.packages = c("ggplot2", "tidyverse", "lubridate", "readxl")
+
+# Install CRAN packages (if not already installed)
+.inst <- .packages %in% installed.packages()
+if(length(.packages[!.inst]) > 0) install.packages(.packages[!.inst])
+
+# Load packages into session 
+lapply(.packages, require, character.only=TRUE)
+
+
+#Here is our raw data, which we pull from our working directory:
+SA_dispositions <- read_csv("raw_data/SA_dispositions.csv",show_col_types = FALSE)
+SA_initiations <- read_csv("raw_data/SA_initiations.csv",show_col_types = FALSE)
+SA_sentencings <- read_csv("raw_data/SA_sentencings.csv",show_col_types = FALSE)
+NCSC_study_table_original <-read_excel("raw_data/NCSC_study_table_original.xlsx", skip=2)
+
+```
+
+### **Preparing the data**
+
+The first step to preparing this data is relatively easy: Cleaning up the NCSC dataset. For this, I limited the analysis to courts that saw at least 50 homicides, and streamlined the dataset to include just the court's name/ location and the percentage of homicide cases completed within a year.
+
+```{r, results=F, message=F, warning=F}
+
+NCSC_study_data <- NCSC_study_table_original %>% 
+  #This filters only to courts with at least 50 homicide cases measured:
+  filter(`Total Homicide Cases`>=50) %>% 
+  #This gets rid of the "total" field (as a clean-up measure)
+  filter(`County/Site`!="Total") %>% 
+  #This creates an easier location field
+  mutate(Location=paste(`County/Site` ," ",State,sep="")) %>% 
+  #This creates a slimmer field name
+  rename(Percent_disposed_one_year=`Homicide cases disposed w/in 365 days`) %>% 
+  select(Location,Percent_disposed_one_year) %>% 
+  #This cleans up the percentage field:
+  mutate(Percent_disposed_one_year=round(as.numeric(Percent_disposed_one_year)*100,0)) %>% 
+  #This sorts by fastest to slowest:
+  arrange(desc(Percent_disposed_one_year))
+
+```
+
+The next step is a bit more complicated. That's because the NCSC analysis looked at homicide, which is a broader crime than murder. NCSC defined homicide cases to include "cases involving murder, negligent manslaughter, vehicular homicide, and others as defined by state and local statute" (but not attempts in which no one died). Also, NCSC determined that figure from the date of a case filing, which in Cook County would be an arraignment -- a court hearing that is often several weeks after an arrest. So this code will use that definition/ methodology to suss out comparable Cook County cases and measurements for 2019, the year before the NCSC study was published.
+
+```{r, results=F, message=F, warning=F}
+
+#The first step is isolating homicide cases in the state's attorney data:
+
+Homicides_2019 <- SA_dispositions %>% 
+  #The first step is gathering cases in which any individual  charges would qualify, by creating new field to flag a line:
+  mutate(Homicide_flag="Unknown") %>% 
+  mutate(Homicide_flag=ifelse(grepl("MURDER",DISPOSITION_CHARGED_OFFENSE_TITLE),"Yes",Homicide_flag)) %>% 
+  mutate(Homicide_flag=ifelse(grepl("MANSLAUGHTER",DISPOSITION_CHARGED_OFFENSE_TITLE),"Yes",Homicide_flag)) %>% 
+  mutate(Homicide_flag=ifelse(grepl("HOMICIDE",DISPOSITION_CHARGED_OFFENSE_TITLE),"Yes",Homicide_flag)) %>% 
+  #The above three gathered all possible lines of homicide charges, but we need to eliminate lines that were just attempts:
+  mutate(Homicide_flag=ifelse(grepl("ATTEMPT",DISPOSITION_CHARGED_OFFENSE_TITLE),"No",Homicide_flag)) %>% 
+  #And we also need to eliminate this charge, which indicates a past (but not current) homicide:
+  mutate(Homicide_flag=ifelse(DISPOSITION_CHARGED_OFFENSE_TITLE=="AGG DUI/PREVIOUS RECK HOMICIDE","No",Homicide_flag)) %>% 
+    #And we also need to eliminate this charge, which also indicates a past (but not current) homicide:
+  mutate(Homicide_flag=ifelse(grepl("VIOLATION OF THE MURDERER AND VIOLENT OFFENDER",DISPOSITION_CHARGED_OFFENSE_TITLE),"No",Homicide_flag)) %>% 
+  #Now let's flag cases that were categorized as murders and homicides:
+  mutate(Homicide_flag=ifelse(DISPOSITION_CHARGED_CLASS=="M","Yes",Homicide_flag)) %>% 
+  mutate(Homicide_flag=ifelse(OFFENSE_CATEGORY=="Homicide","Yes",Homicide_flag)) %>% 
+  #Now we can filter just for cases that qualify ...
+  filter(Homicide_flag=="Yes") %>% 
+  #... and filter just for 2019 dispositions
+  mutate(DISPOSITION_DATE=as.Date(mdy_hms(DISPOSITION_DATE))) %>% 
+  mutate(Disp_year=year(DISPOSITION_DATE)) %>% 
+  filter(Disp_year==2019) %>% 
+  #... and then slim that down to get just a CASE_ID 
+  select(CASE_ID,CASE_PARTICIPANT_ID) %>% 
+  distinct()
+
+#That gives us 241 cases from which we can pull both disposition dates and arraignment dates, and measure them. The first step (explained more in Length_of_cases) is finding a disposition date for each case, based on the type of disposition
+
+homicide_cases_participants_guilty <- Homicides_2019 %>%
+  left_join(SA_dispositions) %>% 
+  #This lists all the possible ways homicide cases end in a guilt finding:
+  filter(CHARGE_DISPOSITION=="Plea of Guilty - Amended Charge"|
+         CHARGE_DISPOSITION=="Plea Of Guilty"|
+         CHARGE_DISPOSITION=="Finding Guilty"|
+         CHARGE_DISPOSITION=="Verdict Guilty"|
+         CHARGE_DISPOSITION=="Finding Guilty - Lesser Included"|
+         CHARGE_DISPOSITION=="Plea of Guilty - Lesser Included"|
+         CHARGE_DISPOSITION=="Finding Guilty But Mentally Ill"|
+         CHARGE_DISPOSITION=="Verdict Guilty - Lesser Included"|
+         CHARGE_DISPOSITION=="Plea of Guilty But Mentally Ill"|
+         CHARGE_DISPOSITION=="Verdict Guilty - Amended Charge"|
+         CHARGE_DISPOSITION=="Finding Guilty - Amended Charge"|
+         CHARGE_DISPOSITION=="Plea of Guilty But Mentally Ill") %>%
+  #Let's clean up our date fields first:
+  mutate(DISPOSITION_DATE=mdy_hms(DISPOSITION_DATE),
+         ARRAIGNMENT_DATE=mdy_hms(ARRAIGNMENT_DATE)) %>% 
+  #Now that we've narrowed to just those guilty ones, let's find earliest disposition date:
+  select(CASE_ID,CASE_PARTICIPANT_ID,DISPOSITION_DATE,ARRAIGNMENT_DATE) %>% 
+  group_by(CASE_ID,CASE_PARTICIPANT_ID) %>% 
+  summarize(DISPOSITION_DATE=min(DISPOSITION_DATE),
+            ARRAIGNMENT_DATE=min(ARRAIGNMENT_DATE)) %>% 
+  #This creates a category that we'll use later during an append operation:
+  mutate(RESULT="Guilty") 
+
+#Let's find the latest date for those not guilty of anything:
+
+homicide_cases_participants_not_guilty <- Homicides_2019 %>% 
+  #Now, asking for every case/participant NOT included in our dataframe of guilty participants 
+  anti_join(homicide_cases_participants_guilty, by=c("CASE_ID","CASE_PARTICIPANT_ID")) %>% 
+  #This slims to just ID info...
+  select(CASE_ID,CASE_PARTICIPANT_ID) %>% 
+  distinct() %>% 
+  #...so we can link it back to include ANY charges of a non-guilty Class M murder case:
+  left_join(SA_dispositions) %>% 
+  #Let's clean up our date fields first:
+  mutate(DISPOSITION_DATE=mdy_hms(DISPOSITION_DATE),
+         ARRAIGNMENT_DATE=mdy_hms(ARRAIGNMENT_DATE)) %>% 
+  #Now that we've narrowed to not guilty ones, let's find latest disposition date:
+  select(CASE_ID,CASE_PARTICIPANT_ID,DISPOSITION_DATE,ARRAIGNMENT_DATE) %>% 
+  group_by(CASE_ID,CASE_PARTICIPANT_ID) %>% 
+  summarize(DISPOSITION_DATE=max(DISPOSITION_DATE),
+            ARRAIGNMENT_DATE=min(ARRAIGNMENT_DATE)) %>% 
+  #Again, creating a category that we'll use later during an append operation:
+  mutate(RESULT="Not Guilty")
+
+#Next step is to combine these, and figure out how many of these cases have disposition and arraignment dates
+
+homicide_cases_participants_dates <- rbind(homicide_cases_participants_guilty,
+                                           homicide_cases_participants_not_guilty)
+
+#Here are the cases with complete dates:
+homicide_cases_participants_full_dates <- homicide_cases_participants_dates %>% 
+  filter(!is.na(ARRAIGNMENT_DATE))
+
+#Unfortunately, out of 241 cases, only 224 have a listed arraignment date. So we'll try to use those other datasets to dig out a date
+
+homicide_cases_participants_need_dates <- homicide_cases_participants_dates %>% 
+  filter(is.na(ARRAIGNMENT_DATE))
+
+#Let's first try initiations:
+
+homicide_initiations_arraignment_try <- homicide_cases_participants_need_dates %>% 
+  select(-ARRAIGNMENT_DATE) %>% 
+  left_join(SA_initiations %>%
+  select(CASE_ID,CASE_PARTICIPANT_ID,ARRAIGNMENT_DATE)) %>%
+  mutate(ARRAIGNMENT_DATE=mdy_hm(ARRAIGNMENT_DATE)) %>% 
+  filter(!is.na(ARRAIGNMENT_DATE))
+
+homicide_sentencing_sentencing_try <- homicide_cases_participants_need_dates %>% 
+  select(-ARRAIGNMENT_DATE) %>% 
+  left_join(SA_sentencings %>% select(CASE_ID,CASE_PARTICIPANT_ID,ARRAIGNMENT_DATE)) %>% 
+  mutate(ARRAIGNMENT_DATE=mdy_hm(ARRAIGNMENT_DATE)) %>% 
+  filter(!is.na(ARRAIGNMENT_DATE))
+
+#Neither had any matches, but we'll still keep the code in there in case future runs would produce matches
+
+homicide_2019_cases_with_dates <- rbind(homicide_cases_participants_full_dates,
+                              homicide_initiations_arraignment_try,
+                              homicide_sentencing_sentencing_try)
+```
+
+### **Analyzing the data**
+
+The next step is figuring out, for Cook County, what percent of homicide cases in 2019 were completed within one year of arraignment.
+
+```{r, results=F, message=F, warning=F}
+
+#The first step is to measure and clean up impossible dates (similar to how we did it in length of cases, by eliminating impossible dates either too small -- like a negative number -- or too large, such as beyond 13 years):
+
+homicide_2019_cases_with_dates_cleaned <- homicide_2019_cases_with_dates %>% 
+  mutate(Disp_days=difftime(DISPOSITION_DATE,ARRAIGNMENT_DATE, units="days")) %>% 
+  filter(Disp_days>=0) %>% 
+  filter(Disp_days/365.25<13)
+
+#Let's figure out how many were 365 or fewer days:
+
+homicide_2019_cases_within_one_year <- homicide_2019_cases_with_dates_cleaned %>% 
+  filter(Disp_days<=365)
+
+#This creates a dataframe of our results:
+
+Location <- "Cook County"
+Percent_disposed_one_year <- round(nrow(homicide_2019_cases_within_one_year)/nrow(homicide_2019_cases_with_dates_cleaned)*100,0) 
+
+Cook_chart_percent_homicides_one_year <- data.frame(Location, Percent_disposed_one_year)
+
+```
+
+Let's combine our original NCSC data with our Cook County data:
+
+```{r, results=F, message=F, warning=F}
+
+Homicide_study_with_Cook <-rbind(NCSC_study_data,
+                                 Cook_chart_percent_homicides_one_year) %>% 
+  arrange(desc(Cook_chart_percent_homicides_one_year))
+
+
+#This cleans up names to make it easier to understand:
+
+Homicide_study_with_Cook <- Homicide_study_with_Cook %>% 
+  mutate(Location=ifelse(grepl("Hennepin",Location),"Minneapolis MN (Hennepin)",Location),
+Location=ifelse(grepl("Pierce",Location),"Tacoma WA (Pierce)",Location),
+Location=ifelse(grepl("St. Louis",Location),"St. Louis (city) MO",Location),
+Location=ifelse(grepl("Jefferson",Location),"Louisville KY (Jefferson)",Location),
+Location=ifelse(grepl("Paso",Location),"Colorado Springs CO (El Paso)",Location),
+Location=ifelse(grepl("New York",Location),"Manhattan (NYC borough)",Location),
+Location=ifelse(grepl("Maricopa",Location),"Phoenix AZ (Maricopa)",Location),
+Location=ifelse(grepl("Allegheny",Location),"Pittsburgh PA (Allegheny)",Location),
+Location=ifelse(grepl("Bronx",Location),"Bronx (NYC borough)",Location),  Location=ifelse(grepl("Jackson",Location),"Kansas City MO (Jackson)",Location), 
+Location=ifelse(grepl("Queens",Location),"Queens (NYC borough)",Location),
+Location=ifelse(grepl("King County",Location),"Seattle WA (King)",Location),
+Location=ifelse(grepl("Kings",Location),"Brooklyn (NYC borough)",Location))
+                                                                      #A copy of this chart is in the Final_data folder
+
+
+
+```
+
+Here is what the chart looks like:
+
+```{r, results=F, message=F, warning=F}
+
+ggplot(Homicide_study_with_Cook) +
+  geom_col(aes(Percent_disposed_one_year,reorder(Location,-Percent_disposed_one_year)))
+
+```
+
+
+
